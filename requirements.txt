@@ -8,3 +8,4 @@ httpx==0.25.2
 PyPDF2==3.0.1
 python-docx==0.8.11
 pydantic==2.5.0
+aiohttp

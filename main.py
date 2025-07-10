@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import os
@@ -157,15 +158,26 @@ class LLMClient:
     def __init__(self, base_url: str = "http://localhost:11434"):
         """Initialize LLM client (default is Ollama)"""
         self.base_url = base_url
-        self.client = httpx.AsyncClient(timeout=60.0)
+        # Increase timeout and add specific timeouts for different operations
+        self.client = httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                connect=10.0,  # Connection timeout
+                read=300.0,    # Read timeout (5 minutes for slow models)
+                write=10.0,    # Write timeout
+                pool=10.0      # Pool timeout
+            )
+        )
     
     async def generate_answer(self, query: str, context_chunks: List[DocumentChunk]) -> str:
         """Generate answer using retrieved context"""
         context = "\n\n".join([f"Source: {chunk.metadata.get('filename', 'Unknown')}\n{chunk.content}" 
                               for chunk in context_chunks])
         
-        prompt = f"""Based on the following legal document excerpts, please provide a comprehensive answer to the user's question. 
-Be precise and cite specific information from the provided sources.
+        # Truncate context if too long to avoid overwhelming the model
+        if len(context) > 4000:
+            context = context[:4000] + "..."
+        
+        prompt = f"""Based on the following legal document excerpts, please provide a comprehensive answer to the user's question. Be precise and cite specific information from the provided sources.
 
 Context:
 {context}
@@ -175,16 +187,23 @@ Question: {query}
 Answer:"""
 
         try:
+            # First, check if Ollama is running
+            health_response = await self.client.get(f"{self.base_url}/api/tags")
+            if health_response.status_code != 200:
+                return f"Ollama server not responding. Status: {health_response.status_code}"
+            
             response = await self.client.post(
                 f"{self.base_url}/api/generate",
                 json={
-                    "model": "tinyllama",  # You can change this to any model you have in Ollama
+                    "model": "tinyllama",
                     "prompt": prompt,
                     "stream": False,
                     "options": {
                         "temperature": 0.1,
                         "top_p": 0.9,
-                        "max_tokens": 1000
+                        "num_predict": 500,  # Limit tokens to speed up response
+                        "top_k": 40,
+                        "repeat_penalty": 1.1
                     }
                 }
             )
@@ -193,10 +212,14 @@ Answer:"""
                 result = response.json()
                 return result.get("response", "Unable to generate response")
             else:
-                return f"Error generating response: {response.status_code}"
+                return f"Error generating response: {response.status_code} - {response.text}"
                 
+        except httpx.ReadTimeout:
+            return "The model is taking too long to respond. This might be due to a complex query or the model being slow."
+        except httpx.ConnectTimeout:
+            return "Cannot connect to Ollama server. Make sure Ollama is running on the specified port."
         except Exception as e:
-            return f"Error connecting to LLM: {str(e)}"
+            return f"Error connecting to LLM: {type(e).__name__}: {str(e)}"
 
 class DocumentProcessor:
     @staticmethod
@@ -224,7 +247,8 @@ class DocumentProcessor:
 
 # Global instances
 document_store = DocumentStore()
-llm_client = LLMClient()
+llm_client = LLMClient(base_url="http://127.0.0.1:11434")
+
 document_processor = DocumentProcessor()
 
 # Pydantic models
@@ -277,6 +301,14 @@ app = FastAPI(
     description="A Retrieval-Augmented Generation backend for legal document queries",
     version="1.0.0",
     lifespan=lifespan
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Or restrict to known domains
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 @app.post("/upload", response_model=UploadResponse)
@@ -413,6 +445,80 @@ async def health_check():
         "chunks_count": len(document_store.chunks),
         "embedding_model": "all-MiniLM-L6-v2"
     }
+
+@app.get("/test-llm-client")
+async def test_llm_client():
+    """Test the actual LLMClient instance"""
+    try:
+        # Test connection
+        response = await llm_client.client.get(f"{llm_client.base_url}/api/tags")
+        
+        if response.status_code == 200:
+            models = response.json()
+            
+            # Test generation
+            test_response = await llm_client.client.post(
+                f"{llm_client.base_url}/api/generate",
+                json={
+                    "model": "tinyllama:latest",  # Use the full model name
+                    "prompt": "Hello, respond in 10 words or less.",
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.1,
+                        "max_tokens": 50
+                    }
+                }
+            )
+            
+            if test_response.status_code == 200:
+                result = test_response.json()
+                return {
+                    "status": "success",
+                    "base_url": llm_client.base_url,
+                    "models": models,
+                    "test_generation": result.get("response", "No response")
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Generation failed: {test_response.status_code}",
+                    "response_text": test_response.text
+                }
+        else:
+            return {
+                "status": "error",
+                "message": f"Connection failed: {response.status_code}",
+                "base_url": llm_client.base_url
+            }
+            
+    except Exception as e:
+        return {
+            "status": "error",
+            "error_type": type(e).__name__,
+            "error_message": str(e),
+            "base_url": llm_client.base_url
+        }
+
+@app.get("/simple-test")
+async def simple_test():
+    """Simple connection test"""
+    import httpx
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get("http://127.0.0.1:11434/api/tags")
+            return {
+                "status": "success",
+                "status_code": response.status_code,
+                "content": response.text[:500]
+            }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error_type": type(e).__name__,
+            "error_message": str(e),
+            "repr": repr(e)
+        }
 
 if __name__ == "__main__":
     import uvicorn
