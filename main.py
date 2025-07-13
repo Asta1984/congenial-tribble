@@ -8,6 +8,9 @@ import uuid
 from datetime import datetime
 import asyncio
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+import os
+
 
 # Vector store and embeddings
 import faiss
@@ -28,6 +31,12 @@ import httpx
 # Document processing
 from dataclasses import dataclass
 from collections import defaultdict
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Get the Ollama URL
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
 
 @dataclass
 class DocumentChunk:
@@ -155,9 +164,9 @@ class DocumentStore:
             self._build_index()
 
 class LLMClient:
-    def __init__(self, base_url: str = "http://localhost:11434"):
+    def __init__(self, base_url: str = "https://ollama-gemma-331149942200.europe-west1.run.app"):
         """Initialize LLM client (default is Ollama)"""
-        self.base_url = base_url
+        self.base_url = OLLAMA_BASE_URL
         # Increase timeout and add specific timeouts for different operations
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(
@@ -195,7 +204,7 @@ Answer:"""
             response = await self.client.post(
                 f"{self.base_url}/api/generate",
                 json={
-                    "model": "tinyllama",
+                    "model": "tinyllama:latest",
                     "prompt": prompt,
                     "stream": False,
                     "options": {
@@ -247,7 +256,7 @@ class DocumentProcessor:
 
 # Global instances
 document_store = DocumentStore()
-llm_client = LLMClient(base_url="http://127.0.0.1:11434")
+llm_client = LLMClient(OLLAMA_BASE_URL)
 
 document_processor = DocumentProcessor()
 
@@ -460,7 +469,7 @@ async def test_llm_client():
             test_response = await llm_client.client.post(
                 f"{llm_client.base_url}/api/generate",
                 json={
-                    "model": "tinyllama:latest",  # Use the full model name
+                    "model": "tinyllama:latest",
                     "prompt": "Hello, respond in 10 words or less.",
                     "stream": False,
                     "options": {
@@ -499,26 +508,7 @@ async def test_llm_client():
             "base_url": llm_client.base_url
         }
 
-@app.get("/simple-test")
-async def simple_test():
-    """Simple connection test"""
-    import httpx
-    
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get("http://127.0.0.1:11434/api/tags")
-            return {
-                "status": "success",
-                "status_code": response.status_code,
-                "content": response.text[:500]
-            }
-    except Exception as e:
-        return {
-            "status": "error",
-            "error_type": type(e).__name__,
-            "error_message": str(e),
-            "repr": repr(e)
-        }
+
 
 if __name__ == "__main__":
     import uvicorn
