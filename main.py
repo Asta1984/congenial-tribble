@@ -10,6 +10,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 import os
+import uvicorn
 
 
 # Vector store and embeddings
